@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	decrypt "github.com/bedag/subst/internal/decryptors"
 	ejson "github.com/bedag/subst/internal/decryptors/ejson"
@@ -13,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/kustomize/api/resource"
 )
 
 type Build struct {
@@ -67,8 +69,8 @@ func (b *Build) BuildSubstitutions() (err error) {
 	return nil
 
 }
-
 func (b *Build) Build() (err error) {
+	start := time.Now() // Start time measurement
 
 	if b.Substitutions == nil {
 		log.Debug().Msg("no resources to build")
@@ -88,14 +90,15 @@ func (b *Build) Build() (err error) {
 
 	// Run Build
 	log.Debug().Msg("substitute manifests")
+	tasks := make(chan *resource.Resource, len(b.Substitutions.Resources.Resources()))
 
 	var wg sync.WaitGroup
 	manifestsMutex := sync.Mutex{}
-	for _, manifest := range b.Substitutions.Resources.Resources() {
+	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-
+			for manifest := range tasks {
 			var c map[interface{}]interface{}
 
 			mBytes, _ := manifest.MarshalJSON()
@@ -127,7 +130,6 @@ func (b *Build) Build() (err error) {
 					return
 				}
 			}
-
 			f, err := b.Substitutions.Eval(c, nil, false)
 			if err != nil {
 				log.Error().Msgf("spruce evaluation failed %s/%s: %s", manifest.GetNamespace(), manifest.GetName(), err)
@@ -136,13 +138,22 @@ func (b *Build) Build() (err error) {
 			manifestsMutex.Lock()
 			b.Manifests = append(b.Manifests, f)
 			manifestsMutex.Unlock()
+			}
 		}()
 	}
-
+	for i, manifest := range b.Substitutions.Resources.Resources() {
+		tasks <- manifest
+		if i == 0 {
+			log.Debug().Msgf("substitute manifests: %s", manifest)
+		}
+	}
+	close(tasks)
 	wg.Wait()
+	log.Debug().Msgf("Build: %s", b.Manifests[0]) // Calculate elapsed time
+	log.Debug().Msgf("Build time: %s", time.Since(start)) // Calculate elapsed time
 
 	return nil
-}
+} 
 
 // builds the substitutions interface
 func (b *Build) loadSubstitutions() (err error) {
